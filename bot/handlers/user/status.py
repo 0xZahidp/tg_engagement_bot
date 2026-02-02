@@ -7,6 +7,7 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.keyboards.main import main_menu_kb
+from bot.database.models import DailyActionType  # ✅ import the enum
 from bot.services.task_progress import TaskProgressService
 from bot.utils.dates import utc_today
 from bot.utils.ensure_user import ensure_user
@@ -24,13 +25,17 @@ async def status_cmd(message: Message, session: AsyncSession) -> None:
 
     done = await TaskProgressService.done_set(session, user_id=user.id, day_utc=day_utc)
 
+    # ✅ Always compare against what is stored: DailyActionType.<X>.value
+    def ok(t: DailyActionType) -> str:
+        return "✅" if t.value in done else "❌"
+
     text = (
         "📌 <b>Today’s progress (UTC)</b>\n"
-        f"• checkin: {'✅' if 'checkin' in done else '❌'}\n"
-        f"• quiz: {'✅' if 'quiz' in done else '❌'}\n"
-        f"• poll: {'✅' if 'poll_vote' in done else '❌'}\n"
-        f"• screenshot: {'✅' if 'screenshot' in done else '❌'}\n"
-        f"• spin: {'✅' if 'spin' in done else '❌'}\n"
+        f"• checkin: {ok(DailyActionType.CHECKIN)}\n"
+        f"• quiz: {ok(DailyActionType.QUIZ)}\n"
+        f"• poll: {ok(DailyActionType.POLL_VOTE)}\n"
+        f"• screenshot: {ok(DailyActionType.SCREENSHOT)}\n"
+        f"• spin: {ok(DailyActionType.SPIN)}\n"
     )
 
     await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())

@@ -33,9 +33,67 @@ class AuthService:
         if admin is None:
             return AuthResult(is_root=False, is_admin=False, role="user")
 
-        # DB admins are general admins for now
         return AuthResult(
             is_root=False,
             is_admin=True,
-            role="admin" if admin.role == AdminRole.ADMIN else "admin",
+            role=admin.role.value,
         )
+
+    async def get_or_create_user_by_telegram(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> User:
+        q = select(User).where(User.telegram_id == telegram_id)
+        res = await session.execute(q)
+        user = res.scalar_one_or_none()
+
+        if user:
+            # Keep data fresh (optional but useful)
+            changed = False
+            if username is not None and user.username != username:
+                user.username = username
+                changed = True
+            if first_name is not None and user.first_name != first_name:
+                user.first_name = first_name
+                changed = True
+            if last_name is not None and user.last_name != last_name:
+                user.last_name = last_name
+                changed = True
+            if changed:
+                await session.flush()
+            return user
+
+        user = User(
+            telegram_id=telegram_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+        )
+        session.add(user)
+        await session.flush()  # user.id becomes available
+        return user
+
+    async def resolve_by_telegram(
+        self,
+        session: AsyncSession,
+        telegram_id: int,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> AuthResult:
+        # Root admins come from env, always takes precedence.
+        if telegram_id in self.settings.root_admin_ids:
+            return AuthResult(is_root=True, is_admin=True, role="root")
+
+        user = await self.get_or_create_user_by_telegram(
+            session=session,
+            telegram_id=telegram_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+        )
+        return await self.resolve(session, user)

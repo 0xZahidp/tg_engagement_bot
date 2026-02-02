@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from enum import Enum  # ✅ Python Enum
 
-from sqlalchemy import Date, DateTime, Enum, ForeignKey, Index, UniqueConstraint, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.database.base import Base
@@ -29,6 +30,7 @@ class DailyAction(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     day_utc: Mapped[date] = mapped_column(Date, index=True)
 
-    action_type: Mapped[str] = mapped_column(index=True)  # store enum string
+    # keep stored as a string (no migrations needed)
+    action_type: Mapped[str] = mapped_column(index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())

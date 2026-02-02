@@ -14,6 +14,7 @@ from bot.database.models import *  # noqa: F401,F403
 
 from bot.utils.middleware import DbSessionMiddleware
 from bot.handlers import router as handlers_router
+from bot.scheduler import setup_scheduler
 
 
 def setup_logging(is_dev: bool) -> None:
@@ -61,27 +62,43 @@ async def main() -> None:
 
     # Inject Settings to handlers
     dp.workflow_data["settings"] = settings
+    dp.workflow_data["db"] = db
 
     # DB session per update
     dp.update.middleware(DbSessionMiddleware(db))
 
-    # Include routers
+    # Include routers (admin/user/common)
     dp.include_router(handlers_router)
+
+    # Start scheduler AFTER bot+db are ready
+    scheduler = setup_scheduler(bot=bot, db=db, settings=settings)
+    log.info("Scheduler started")
 
     try:
         await dp.start_polling(bot)
-    except asyncio.CancelledError:
-        # Normal shutdown path on Ctrl+C / cancellation
-        pass
-    except KeyboardInterrupt:
-        # Some environments raise this explicitly
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Normal shutdown path
         pass
     except Exception:
         log.exception("Bot crashed")
         raise
     finally:
-        await db.close()
-        await bot.session.close()
+        # Stop scheduler first (prevents jobs firing during shutdown)
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            log.exception("Failed to shutdown scheduler")
+
+        # Close DB + bot session
+        try:
+            await db.close()
+        except Exception:
+            log.exception("Failed to close DB")
+
+        try:
+            await bot.session.close()
+        except Exception:
+            log.exception("Failed to close bot session")
 
 
 if __name__ == "__main__":

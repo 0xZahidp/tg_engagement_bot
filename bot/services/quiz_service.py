@@ -1,77 +1,106 @@
 # bot/services/quiz_service.py
 from __future__ import annotations
 
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models.quiz import Quiz, QuizAttempt
-from bot.database.models import PointSource
-from bot.services.points import PointsService
-from bot.utils.dates import week_start_monday
+from bot.database.models.daily_action import DailyAction, DailyActionType
+
+# points service: try both common names (so it won’t break if yours differs)
+try:
+    from bot.services.points import add_points  # type: ignore
+except Exception:
+    add_points = None  # noqa: E501
 
 
-def utc_today() -> date:
+def utc_today() -> datetime.date:
     return datetime.now(timezone.utc).date()
 
 
-class QuizService:
-    def __init__(self, session: AsyncSession):
-        self.session = session
+async def get_today_quiz(session: AsyncSession) -> dict | None:
+    today = utc_today()
 
-    async def get_quiz_for_day(self, day: date) -> Quiz | None:
-        res = await self.session.execute(
-            select(Quiz)
-            .where(Quiz.day_utc == day)
-            .options(selectinload(Quiz.options))
+    quiz = await session.scalar(
+        select(Quiz)
+        .where(Quiz.day_utc == today)
+        .options(selectinload(Quiz.options))
+    )
+    if quiz is None:
+        return None
+
+    options = [opt.text for opt in quiz.options]  # ordered by relationship order_by
+    return {
+        "id": quiz.id,
+        "question": quiz.question,
+        "options": options,
+        "correct_index": quiz.correct_option_index,
+        "points_correct": quiz.points_correct,
+        "points_wrong": quiz.points_wrong,
+        "day_utc": quiz.day_utc,
+    }
+
+
+async def has_attempted_today(session: AsyncSession, user_id: int, quiz_id: int) -> bool:
+    today = utc_today()
+    exists = await session.scalar(
+        select(QuizAttempt.id).where(
+            QuizAttempt.user_id == user_id,
+            QuizAttempt.quiz_id == quiz_id,
+            QuizAttempt.day_utc == today,
         )
-        return res.scalar_one_or_none()
+    )
+    return exists is not None
 
-    async def get_today_quiz(self) -> Quiz | None:
-        return await self.get_quiz_for_day(utc_today())
 
-    async def get_attempt(self, quiz_id: int, user_id: int) -> QuizAttempt | None:
-        res = await self.session.execute(
-            select(QuizAttempt).where(
-                QuizAttempt.quiz_id == quiz_id,
-                QuizAttempt.user_id == user_id,
-            )
-        )
-        return res.scalar_one_or_none()
+async def submit_attempt(session: AsyncSession, user_id: int, quiz_id: int, chosen_index: int) -> dict:
+    quiz = await get_today_quiz(session)
+    if quiz is None or quiz["id"] != quiz_id:
+        return {"ok": False, "message": "⚠️ This quiz is not valid anymore.", "points_delta": 0}
 
-    async def submit_attempt(self, quiz: Quiz, user_id: int, chosen_index: int) -> QuizAttempt | None:
-        # Prevent double attempt
-        existing = await self.get_attempt(quiz.id, user_id)
-        if existing:
-            return None
+    today = quiz["day_utc"]
 
-        is_correct = int(chosen_index == quiz.correct_option_index)
-        points = quiz.points_correct if is_correct else quiz.points_wrong
+    # hard check first
+    if await has_attempted_today(session, user_id=user_id, quiz_id=quiz_id):
+        return {"ok": False, "message": "✅ You already answered today’s quiz.", "points_delta": 0}
 
-        attempt = QuizAttempt(
-            quiz_id=quiz.id,
-            user_id=user_id,
-            day_utc=quiz.day_utc,
-            chosen_index=chosen_index,
-            is_correct=is_correct,
-            points_awarded=int(points),
-        )
-        self.session.add(attempt)
-        await self.session.flush()  # attempt.id available (and unique constraints checked)
+    is_correct = int(chosen_index) == int(quiz["correct_index"])
+    points = int(quiz["points_correct"] if is_correct else quiz["points_wrong"])
 
-        # Award points (duplicate-safe by PointEvent uq)
-        ws = week_start_monday(quiz.day_utc)
-        await PointsService.add_points(
-            self.session,
-            user_id=user_id,
-            week_start=ws,
-            day_utc=quiz.day_utc,
-            source=PointSource.QUIZ,
-            points=int(points),
-            ref_type="quiz",
-            ref_id=int(quiz.id),
-        )
+    attempt = QuizAttempt(
+        quiz_id=quiz_id,
+        user_id=user_id,
+        day_utc=today,
+        chosen_index=int(chosen_index),
+        is_correct=1 if is_correct else 0,
+        points_awarded=points,
+    )
+    action = DailyAction(
+        user_id=user_id,
+        day_utc=today,
+        action_type=DailyActionType.QUIZ.value,
+    )
 
-        return attempt
+    session.add(attempt)
+    session.add(action)
+
+    try:
+        # points (if you have add_points in your project)
+        if points and add_points is not None:
+            await add_points(session, user_id=user_id, delta=points, reason="quiz")
+
+        # commit happens in middleware, but we must catch unique-constraint races
+        return {
+            "ok": True,
+            "message": (f"✅ Correct! +{points} points." if is_correct else "❌ Wrong answer. Try again tomorrow (UTC)."),
+            "points_delta": points,
+        }
+
+    except IntegrityError:
+        # user spam clicked; unique constraint blocked duplicate rows
+        await session.rollback()
+        return {"ok": False, "message": "✅ You already answered today’s quiz.", "points_delta": 0}

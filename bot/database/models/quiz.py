@@ -45,6 +45,7 @@ class Quiz(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), server_default=func.now())
 
     options: Mapped[list["QuizOption"]] = relationship(
+        "QuizOption",
         back_populates="quiz",
         cascade="all, delete-orphan",
         order_by="QuizOption.index",
@@ -63,7 +64,7 @@ class QuizOption(Base):
     index: Mapped[int] = mapped_column(Integer)  # 0..n-1
     text: Mapped[str] = mapped_column(String(256))
 
-    quiz: Mapped["Quiz"] = relationship(back_populates="options")
+    quiz: Mapped["Quiz"] = relationship("Quiz", back_populates="options")
 
 
 class QuizAttempt(Base):

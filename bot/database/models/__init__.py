@@ -8,7 +8,8 @@ from .screenshot import ScreenshotSubmission, ScreenshotStatus
 from .spin import SpinHistory, SpinRewardType
 from .logs import AdminActionLog
 from .daily_action import DailyAction, DailyActionType
-
+from .weekly_winner import WeeklyWinner
+from .app_config import AppConfig
 
 __all__ = [
     "User",
@@ -30,4 +31,6 @@ __all__ = [
     "AdminActionLog",
     "DailyAction",
     "DailyActionType",
+    "WeeklyWinner",
+    "AppConfig",
 ]
