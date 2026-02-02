@@ -35,47 +35,40 @@ class PointsService:
         new_last_checkin_day: date | None = None,
         new_checkin_streak: int | None = None,
     ) -> PointsApplyResult:
-        """
-        Award points exactly once (duplicate-safe using PointEvent unique constraint).
-        Returns awarded=False if this award already exists.
-        """
         points = int(points)
 
-        async with transactional(session):
-            # 1) Try to write ledger event FIRST (so duplicates do not increment weekly stats)
-            session.add(
-                PointEvent(
-                    user_id=user_id,
-                    week_start=week_start,
-                    day_utc=day_utc,
-                    source=source,
-                    points=points,
-                    ref_type=ref_type,
-                    ref_id=ref_id,
-                )
-            )
-
-            try:
-                await session.flush()  # triggers uq constraint check
-            except IntegrityError:
-                # Duplicate award attempt
-                await session.rollback()
-
-                # Fetch current stats to return stable values
-                res = await session.execute(
-                    select(WeeklyUserStats).where(
-                        WeeklyUserStats.week_start == week_start,
-                        WeeklyUserStats.user_id == user_id,
+        # ✅ SAVEPOINT only for the unique ledger insert
+        try:
+            async with session.begin_nested():
+                session.add(
+                    PointEvent(
+                        user_id=user_id,
+                        week_start=week_start,
+                        day_utc=day_utc,
+                        source=source,
+                        points=points,
+                        ref_type=ref_type,
+                        ref_id=ref_id,
                     )
                 )
-                ws = res.scalar_one_or_none()
-                return PointsApplyResult(
-                    awarded=False,
-                    new_week_points=int(ws.points) if ws else 0,
-                    week_streak=int(ws.checkin_streak) if ws else 0,
+                await session.flush()
+        except IntegrityError:
+            # Duplicate award attempt (safe: only savepoint rolled back)
+            res = await session.execute(
+                select(WeeklyUserStats).where(
+                    WeeklyUserStats.week_start == week_start,
+                    WeeklyUserStats.user_id == user_id,
                 )
+            )
+            ws = res.scalar_one_or_none()
+            return PointsApplyResult(
+                awarded=False,
+                new_week_points=int(ws.points) if ws else 0,
+                week_streak=int(ws.checkin_streak) if ws else 0,
+            )
 
-            # 2) Upsert weekly stats atomically (SQLite ON CONFLICT)
+        # ✅ Weekly stats update still uses your transactional helper
+        async with transactional(session):
             stmt = sqlite_insert(WeeklyUserStats).values(
                 week_start=week_start,
                 user_id=user_id,
@@ -86,7 +79,6 @@ class PointsService:
                 index_elements=["week_start", "user_id"],
                 set_={
                     "points": WeeklyUserStats.points + points,
-                    # only update streak fields if provided
                     "checkin_streak": (
                         new_checkin_streak if new_checkin_streak is not None else WeeklyUserStats.checkin_streak
                     ),
@@ -97,7 +89,6 @@ class PointsService:
             )
             await session.execute(stmt)
 
-            # 3) Load updated stats
             res = await session.execute(
                 select(WeeklyUserStats).where(
                     WeeklyUserStats.week_start == week_start,

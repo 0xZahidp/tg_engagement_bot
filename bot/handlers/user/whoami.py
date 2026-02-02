@@ -6,8 +6,8 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.keyboards.main import main_menu_kb
 from bot.utils.ensure_user import ensure_user
+from bot.utils.reply import reply_safe
 
 router = Router()
 
@@ -40,4 +40,8 @@ async def whoami(message: Message, session: AsyncSession) -> None:
         f"• Role: {role}\n"
     )
 
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+    await reply_safe(
+        message,
+        text,
+        parse_mode="HTML",
+    )

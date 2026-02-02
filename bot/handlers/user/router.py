@@ -9,6 +9,7 @@ from bot.handlers.user.quiz import router as quiz_router
 from bot.handlers.user.menu_stub import router as menu_stub_router
 from bot.handlers.user.leaderboard import router as leaderboard_router
 from bot.handlers.user.screenshot import router as screenshot_router
+from .spin import router as spin_router
 
 
 router = Router(name="user")
@@ -21,3 +22,4 @@ router.include_router(quiz_router)
 router.include_router(menu_stub_router)
 router.include_router(leaderboard_router)
 router.include_router(screenshot_router)
+router.include_router(spin_router)

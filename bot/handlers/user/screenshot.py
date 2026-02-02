@@ -16,12 +16,11 @@ from bot.database.models import User
 from bot.database.repo.screenshot_repo import create_submission_once
 from bot.services.auth import AuthService
 from bot.database.repo.config_repo import get_config
-
+from bot.utils.reply import reply_safe
+from bot.keyboards.open_bot import open_bot_kb
 
 log = logging.getLogger(__name__)
 router = Router()
-
-SCREENSHOT_POINTS_DEFAULT = 15
 
 
 class ScreenshotStates(StatesGroup):
@@ -43,6 +42,7 @@ def _review_kb(submission_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
+
 async def _ensure_user(session: AsyncSession, settings: Settings, message: Message) -> User | None:
     tg = message.from_user
     if not tg:
@@ -62,20 +62,33 @@ async def _ensure_user(session: AsyncSession, settings: Settings, message: Messa
 
 
 @router.message(F.text.in_({"🖼 Screenshot", "/screenshot"}))
-async def screenshot_entry(message: Message, state: FSMContext) -> None:
+async def screenshot_entry(message: Message, state: FSMContext, settings: Settings) -> None:
+    # 🚫 BLOCK FSM IN GROUPS
+    if message.chat.type != "private":
+        await message.answer(
+            "🖼 <b>Screenshot submission is available in private chat only.</b>\n\n"
+            "Please open the bot and submit your screenshot there.",
+            parse_mode="HTML",
+            reply_markup=open_bot_kb(settings.bot_username),
+        )
+        return
+
+    # ✅ PRIVATE CHAT → FSM STARTS
     await state.set_state(ScreenshotStates.waiting_photo)
-    await message.answer(
+    await reply_safe(
+        message,
         "🖼 <b>Screenshot Task</b>\n\n"
         "Send <b>one</b> screenshot photo now.\n"
         "✅ 1 submission per day (UTC)\n\n"
-        "Cancel: /cancel"
+        "Cancel: /cancel",
+        parse_mode="HTML",
     )
 
 
 @router.message(F.text == "/cancel")
 async def screenshot_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("✅ Cancelled.")
+    await reply_safe(message, "✅ Cancelled.")
 
 
 @router.message(ScreenshotStates.waiting_photo, F.photo)
@@ -88,19 +101,12 @@ async def screenshot_receive_photo(
 ) -> None:
     user = await _ensure_user(session, settings, message)
     if not user:
-        await message.answer("⚠️ Please try again.")
+        await reply_safe(message, "⚠️ Please try again.")
         return
 
-    tg = message.from_user
-    if not tg:
-        await message.answer("⚠️ Please try again.")
-        return
-
-    # best quality photo
     photo = message.photo[-1]
     image_file_id = photo.file_id
-    platform_uid = str(tg.id)
-
+    platform_uid = str(message.from_user.id)
     today = _utc_today()
 
     created, sub = await create_submission_once(
@@ -109,33 +115,32 @@ async def screenshot_receive_photo(
         day_utc=today,
         platform_uid=platform_uid,
         image_file_id=image_file_id,
-        group_chat_id=message.chat.id if message.chat else None,
+        group_chat_id=message.chat.id,
         group_message_id=message.message_id,
     )
 
     if not created:
         await session.rollback()
         await state.clear()
-        await message.answer("ℹ️ You already submitted a screenshot for today (UTC).")
+        await reply_safe(message, "ℹ️ You already submitted a screenshot for today (UTC).")
         return
 
     await session.commit()
     await state.clear()
 
-    review_chat_id = settings.admin_review_chat_id or settings.group_id
-    if not review_chat_id:
-        await message.answer("✅ Submitted, but admin review chat is not configured yet.")
-        return
-    
     cfg = await get_config(session)
     if not cfg.screenshot_enabled:
-        await message.answer("ℹ️ Screenshot task is currently disabled by admins.")
+        await reply_safe(message, "ℹ️ Screenshot task is currently disabled by admins.")
         return
 
-    username = f"@{user.username}" if user.username else "(no username)"
+    review_chat_id = settings.admin_review_chat_id or settings.group_id
+    if not review_chat_id:
+        await reply_safe(message, "✅ Submitted, but admin review chat is not configured yet.")
+        return
+
     caption = (
         "🖼 <b>Screenshot Review</b>\n\n"
-        f"👤 <b>User:</b> {username}\n"
+        f"👤 <b>User:</b> @{user.username or 'unknown'}\n"
         f"🗓 <b>Day (UTC):</b> {today.isoformat()}\n"
         f"🆔 <b>Submission ID:</b> {sub.id}\n"
         f"⭐ <b>Points on approve:</b> {cfg.screenshot_points}"
@@ -147,12 +152,18 @@ async def screenshot_receive_photo(
             photo=image_file_id,
             caption=caption,
             reply_markup=_review_kb(sub.id),
+            parse_mode="HTML",
         )
-        # store message ids for transparency/audit
         from bot.database.repo.screenshot_repo import set_admin_post_meta
-        await set_admin_post_meta(session, submission_id=sub.id, admin_chat_id=m.chat.id, admin_message_id=m.message_id)
+
+        await set_admin_post_meta(
+            session,
+            submission_id=sub.id,
+            admin_chat_id=m.chat.id,
+            admin_message_id=m.message_id,
+        )
         await session.commit()
     except Exception:
         log.exception("Failed to send screenshot to review chat")
-    
-    await message.answer("✅ Screenshot submitted! It will be reviewed by admins.")
+
+    await reply_safe(message, "✅ Screenshot submitted! It will be reviewed by admins.")

@@ -15,6 +15,7 @@ from bot.database.models import *  # noqa: F401,F403
 from bot.utils.middleware import DbSessionMiddleware
 from bot.handlers import router as handlers_router
 from bot.scheduler import setup_scheduler
+from bot.services.poll_scheduler import poll_scheduler_loop
 
 
 def setup_logging(is_dev: bool) -> None:
@@ -30,18 +31,17 @@ def setup_logging(is_dev: bool) -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-    # Silence SQLAlchemy + migrations noise
     for name in (
         "sqlalchemy",
         "sqlalchemy.engine",
         "sqlalchemy.pool",
         "sqlalchemy.orm",
         "alembic",
+        "asyncpg",
+        "aiosqlite",
+        "psycopg",
+        "psycopg2",
     ):
-        logging.getLogger(name).setLevel(logging.WARNING)
-
-    # DB drivers can be chatty too
-    for name in ("asyncpg", "aiosqlite", "psycopg", "psycopg2"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -58,9 +58,10 @@ async def main() -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
     dp = Dispatcher()
 
-    # Inject Settings to handlers
+    # Inject workflow data
     dp.workflow_data["settings"] = settings
     dp.workflow_data["db"] = db
 
@@ -70,20 +71,31 @@ async def main() -> None:
     # Include routers (admin/user/common)
     dp.include_router(handlers_router)
 
-    # Start scheduler AFTER bot+db are ready
+    # APScheduler (your existing)
     scheduler = setup_scheduler(bot=bot, db=db, settings=settings)
     log.info("Scheduler started")
+
+    # Poll scheduler loop
+    poll_task = asyncio.create_task(poll_scheduler_loop(bot, db, interval_seconds=15))
+    log.info("Poll scheduler loop started")
 
     try:
         await dp.start_polling(bot)
     except (asyncio.CancelledError, KeyboardInterrupt):
-        # Normal shutdown path
         pass
     except Exception:
         log.exception("Bot crashed")
         raise
     finally:
-        # Stop scheduler first (prevents jobs firing during shutdown)
+        # Stop poll loop
+        try:
+            poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
+        except Exception:
+            log.exception("Failed to cancel poll loop")
+
+        # Stop scheduler
         try:
             scheduler.shutdown(wait=False)
         except Exception:
@@ -102,4 +114,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    import contextlib
     asyncio.run(main())

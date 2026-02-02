@@ -6,11 +6,11 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.keyboards.main import main_menu_kb
-from bot.database.models import DailyActionType  # ✅ import the enum
+from bot.database.models import DailyActionType
 from bot.services.task_progress import TaskProgressService
 from bot.utils.dates import utc_today
 from bot.utils.ensure_user import ensure_user
+from bot.utils.reply import reply_safe
 
 router = Router()
 
@@ -23,9 +23,10 @@ async def status_cmd(message: Message, session: AsyncSession) -> None:
     user = await ensure_user(session, message)
     day_utc = utc_today()
 
-    done = await TaskProgressService.done_set(session, user_id=user.id, day_utc=day_utc)
+    done = await TaskProgressService.done_set(
+        session, user_id=user.id, day_utc=day_utc
+    )
 
-    # ✅ Always compare against what is stored: DailyActionType.<X>.value
     def ok(t: DailyActionType) -> str:
         return "✅" if t.value in done else "❌"
 
@@ -38,4 +39,8 @@ async def status_cmd(message: Message, session: AsyncSession) -> None:
         f"• spin: {ok(DailyActionType.SPIN)}\n"
     )
 
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb())
+    await reply_safe(
+        message,
+        text,
+        parse_mode="HTML",
+    )

@@ -2,18 +2,15 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import DailyAction, DailyActionType
-from bot.database.tx import transactional
 
 
 def _normalize_action_type(action_type: DailyActionType | str) -> str:
-    # Accept Enum OR string, always store as string in DB
     if isinstance(action_type, DailyActionType):
         return action_type.value
     return str(action_type).strip()
@@ -30,13 +27,13 @@ class TaskProgressService:
     ) -> None:
         at = _normalize_action_type(action_type)
 
-        # idempotent insert
+        # ✅ Use a SAVEPOINT so duplicates don't rollback the whole session
         try:
-            async with transactional(session):
+            async with session.begin_nested():
                 session.add(DailyAction(user_id=user_id, day_utc=day_utc, action_type=at))
                 await session.flush()
         except IntegrityError:
-            await session.rollback()
+            # duplicate => already done, ignore
             return
 
     @staticmethod

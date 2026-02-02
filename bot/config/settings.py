@@ -37,24 +37,25 @@ def _parse_int_list(raw: str, key_name: str) -> list[int]:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    # required
+    # --- required ---
     bot_token: str
+    bot_username: str  # 🔥 REQUIRED for deep links
 
-    # optional (will be required later by specific features)
+    # --- optional ---
     database_url: str = "sqlite+aiosqlite:///./bot.db"
 
-    # security/admin
+    # --- security / admin ---
     root_admin_ids: tuple[int, ...] = ()
 
-    # telegram targets (optional for now)
-    group_id: Optional[int] = None              # main community group/channel (leaderboard posts, cards, etc.)
-    admin_review_chat_id: Optional[int] = None  # where approvals can be routed (optional)
+    # --- telegram targets ---
+    group_id: Optional[int] = None
+    admin_review_chat_id: Optional[int] = None
 
-    # scheduler / time
+    # --- scheduler / time ---
     timezone: str = "UTC"
 
-    # environment mode
-    environment: str = "production"  # or "development"
+    # --- environment ---
+    environment: str = "production"  # production | development
 
     @property
     def is_dev(self) -> bool:
@@ -70,10 +71,11 @@ class Settings:
         env = os.environ
 
         bot_token = _require(env, "BOT_TOKEN")
+        bot_username = _require(env, "BOT_USERNAME")  # ✅ FIXED
 
         database_url = env.get("DATABASE_URL", "sqlite+aiosqlite:///./bot.db").strip()
 
-        root_admin_ids_raw = env.get("ROOT_ADMIN_IDS", "").strip()
+        root_admin_ids_raw = env.get("ROOT_ADMIN_IDS", "")
         root_admin_ids_list = _parse_int_list(root_admin_ids_raw, "ROOT_ADMIN_IDS")
 
         group_id_raw = env.get("GROUP_ID", "").strip()
@@ -91,6 +93,7 @@ class Settings:
 
         return cls(
             bot_token=bot_token,
+            bot_username=bot_username,
             database_url=database_url,
             root_admin_ids=tuple(root_admin_ids_list),
             group_id=group_id,

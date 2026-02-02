@@ -11,8 +11,7 @@ from bot.keyboards.main import (
 router = Router()
 
 STUBS = {
-    BTN_POLL: "📊 Poll automation is coming later. (Step 8)",
-    BTN_SPIN: "🎰 Spin unlock is coming later. (Step 10)",
+    
 }
 
 @router.message(lambda m: (m.text or "").strip() in STUBS)
