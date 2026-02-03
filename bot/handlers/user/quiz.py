@@ -165,6 +165,14 @@ async def quiz_answer(
         await reply_safe(cb.message, "ℹ️ You already attempted today’s quiz.")
         return
 
+    # ✅ KEY FIX: mark quiz done on SUCCESSFUL ATTEMPT (right or wrong, points or no points)
+    await TaskProgressService.mark_done(
+        session,
+        user_id=user.id,
+        day_utc=today_utc,
+        action_type="quiz",
+    )
+
     awarded_points = result.points_awarded
     if awarded_points != 0:
         award = await award_points_once(
@@ -189,13 +197,6 @@ async def quiz_answer(
                 parse_mode="HTML",
             )
             return
-
-        await TaskProgressService.mark_done(
-            session,
-            user_id=user.id,
-            day_utc=today_utc,
-            action_type="quiz",
-        )
 
     await session.commit()
 
