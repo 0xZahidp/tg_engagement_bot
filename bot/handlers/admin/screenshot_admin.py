@@ -67,6 +67,23 @@ async def _admin_user(session: AsyncSession, settings: Settings, cb: CallbackQue
     return res.scalar_one_or_none()
 
 
+def _display_name(u: User) -> str:
+    name = " ".join([p for p in [u.first_name, u.last_name] if p and str(p).strip()])
+    return name.strip() or "Unknown"
+
+
+def _mention_html(u: User) -> str:
+    # clickable mention even if no username
+    return f'<a href="tg://user?id={u.telegram_id}">{_display_name(u)}</a>'
+
+
+def _admin_label(u: User) -> str:
+    # Prefer @username, else clickable mention
+    if u.username:
+        return f"@{u.username}"
+    return _mention_html(u)
+
+
 @router.callback_query(F.data.startswith("ss:"))
 async def screenshot_review_action(
     cb: CallbackQuery,
@@ -181,6 +198,7 @@ async def screenshot_review_action(
             ref_type="screenshot",
             ref_id=submission_id,
         )
+
         await TaskProgressService.mark_done(
             session,
             user_id=sub.user_id,
@@ -189,6 +207,10 @@ async def screenshot_review_action(
         )
         await session.commit()
 
+        # Points actually awarded now (0 if already credited)
+        pts_awarded = points if award.awarded else 0
+
+        # Update admin-review message UI
         if cb.message:
             try:
                 await cb.message.edit_caption((cb.message.caption or "") + "\n\n✅ <b>APPROVED</b>")
@@ -196,15 +218,50 @@ async def screenshot_review_action(
             except Exception:
                 pass
 
+        # ✅ NEW: send message in REVIEW GROUP: approved by admin
+        if cb.message:
+            try:
+                await cb.message.answer(
+                    f"✅ Screenshot approved by <b>{_admin_label(admin_user)}</b>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        # ✅ Notify user (DM)
         try:
-            pts = points if award.awarded else 0
             extra = "" if award.awarded else " (already credited)"
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=f"✅ Your screenshot was approved! +{pts} points{extra}.",
+                text=f"✅ Your screenshot was approved! +{pts_awarded} points{extra}.",
             )
         except Exception:
             log.exception("Failed to notify user approval")
+
+        # ✅ Post approved screenshot to MAIN GROUP (+ points + name + optional username)
+        main_group_id = settings.group_id
+        if main_group_id:
+            uname = f"@{user.username}" if user.username else ""
+            mention = _mention_html(user)
+
+            caption = (
+                "✅ <b>Approved Screenshot</b>\n\n"
+                f"👤 <b>User:</b> {mention}"
+                + (f"\n🔗 <b>Username:</b> {uname}" if uname else "")
+                + f"\n⭐ <b>Points:</b> {pts_awarded}"
+                + f"\n🗓 <b>Day (UTC):</b> {sub.day_utc.isoformat()}"
+            )
+
+            try:
+                await bot.send_photo(
+                    chat_id=main_group_id,
+                    photo=sub.image_file_id,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                log.exception("Failed to post approved screenshot to main group")
+
         return
 
     # -----------------------
@@ -233,6 +290,7 @@ async def screenshot_review_action(
             except Exception:
                 pass
 
+        # ✅ Ensure user gets rejection DM
         try:
             await bot.send_message(chat_id=user.telegram_id, text="❌ Your screenshot was rejected.")
         except Exception:
