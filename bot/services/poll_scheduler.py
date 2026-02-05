@@ -20,7 +20,7 @@ async def poll_scheduler_loop(bot: Bot, db: Database, *, interval_seconds: int =
 
         try:
             async with db.session() as session:
-                # 1) Post due polls
+                # 1) Post due polls (scheduled ones)
                 due = await PollService.list_due_to_post(session, now, limit=10)
                 for p in due:
                     try:
@@ -34,6 +34,7 @@ async def poll_scheduler_loop(bot: Bot, db: Database, *, interval_seconds: int =
                             allows_multiple_answers=False,
                         )
 
+                        # Try pin (ignore failures)
                         try:
                             await bot.pin_chat_message(
                                 chat_id=p.chat_id,
@@ -65,6 +66,8 @@ async def poll_scheduler_loop(bot: Bot, db: Database, *, interval_seconds: int =
                                 pass
 
                         await PollService.mark_closed(session, poll_id=p.id)
+
+                        # Fallback awarding (usually 0 because we award on vote)
                         awarded = await PollService.award_points_after_close(session, poll_id=p.id, now_utc=now)
 
                         log.info("Closed poll id=%s awarded=%s", p.id, awarded)

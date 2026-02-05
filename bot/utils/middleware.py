@@ -1,26 +1,27 @@
 # bot/utils/middleware.py
 from __future__ import annotations
 
+import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.session import Database
-from bot.database.repo.users import upsert_user_from_event
+from bot.database import Database
+
+log = logging.getLogger("bot.middleware.db")
 
 
 class DbSessionMiddleware(BaseMiddleware):
     """
-    Creates a DB session per update and injects it into handler data as `session`.
-
-    Also upserts the current Telegram user (if present) and injects it as `db_user`.
-    Auto-commits on success and rolls back on error.
+    Per-update DB session injected as data["session"].
+    Works for ALL update types (Message, CallbackQuery, PollAnswer, etc.).
+    Auto-commit on success, rollback on error.
     """
 
     def __init__(self, db: Database) -> None:
+        super().__init__()
         self.db = db
 
     async def __call__(
@@ -29,19 +30,16 @@ class DbSessionMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any],
     ) -> Any:
-        async with self.db.SessionLocal() as session:  # type: ignore[attr-defined]
+        async with self.db.session() as session:  # type: AsyncSession
             data["session"] = session
-
-            # Upsert DB user for message/callback/etc updates (when user exists)
-            db_user = await upsert_user_from_event(session, event)
-            if db_user is not None:
-                data["db_user"] = db_user
-
             try:
                 result = await handler(event, data)
                 await session.commit()
                 return result
             except Exception:
-                await session.rollback()
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
+                log.exception("DB middleware: unhandled exception")
                 raise
- 

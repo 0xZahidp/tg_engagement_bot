@@ -3,48 +3,45 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from aiogram import Router, F
+from aiogram import Router
+from aiogram.filters import Command
 from aiogram.types import Message
+from aiogram.utils.text_decorations import html_decoration as hd
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config.settings import Settings
 from bot.services.auth import AuthService
 from bot.services.polls import PollService, CreatePollInput
-from aiogram.utils.text_decorations import html_decoration as hd
-
 
 router = Router()
 
 
 def _parse_poll_command(text: str) -> tuple[int | None, datetime, int, str, list[str]]:
     """
-    Supports BOTH formats:
-
-    A) With chat id:
-    /poll <chat_id> | <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> | ...
-
-    B) Without chat id (uses settings.GROUP_ID):
-    /poll <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> | ...
+    /poll_schedule <chat_id> | <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> | ...
+    OR
+    /poll_schedule <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> | ...  (uses GROUP_ID)
     """
-    raw = text.split(maxsplit=1)
+    raw = (text or "").split(maxsplit=1)
     if len(raw) < 2:
         raise ValueError(
             "Usage:\n"
-            "A) /poll <chat_id> | <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> ...\n"
-            "B) /poll <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> ... (uses GROUP_ID)"
+            "A) /poll_schedule <chat_id> | <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> ...\n"
+            "B) /poll_schedule <YYYY-MM-DD HH:MM UTC> | <points> | <question> | <opt1> | <opt2> ... (uses GROUP_ID)"
         )
 
-    parts = [p.strip() for p in raw[1].split("|")]
+    parts = [p.strip() for p in raw[1].split("|") if p.strip()]
 
-    # detect whether first part is chat_id or datetime
-    # if it looks like an int (e.g. -100123...), treat as chat_id
     chat_id: int | None = None
-    try:
-        if parts and (parts[0].startswith("-") or parts[0].isdigit()):
-            chat_id = int(parts[0])
-            parts = parts[1:]
-    except Exception:
-        chat_id = None
+    if parts:
+        first = parts[0]
+        try:
+            maybe = int(first)
+            if str(maybe).startswith("-100") or maybe <= -1000000000:
+                chat_id = maybe
+                parts = parts[1:]
+        except Exception:
+            pass
 
     if len(parts) < 5:
         raise ValueError("Need: YYYY-MM-DD HH:MM (UTC) | points | question | opt1 | opt2 ...")
@@ -53,7 +50,6 @@ def _parse_poll_command(text: str) -> tuple[int | None, datetime, int, str, list
     points = int(parts[1])
     question = parts[2]
     options = parts[3:]
-
     return chat_id, when_utc, points, question, options
 
 
@@ -75,20 +71,17 @@ async def require_admin_or_reply(message: Message, settings: Settings, session: 
         await message.answer("⛔ You are not allowed to use admin commands.")
         return None
 
-    # Return resolved db user (or user_id) so we can store created_by_admin_id correctly
     return authz
 
 
-@router.message(F.text.startswith("/poll"))
-async def cmd_poll(message: Message, settings: Settings, session: AsyncSession) -> None:
+@router.message(Command("poll_schedule"))
+async def cmd_poll_schedule(message: Message, settings: Settings, session: AsyncSession) -> None:
     authz = await require_admin_or_reply(message, settings, session)
     if not authz:
         return
 
     try:
         parsed_chat_id, when_utc, points, question, options = _parse_poll_command(message.text or "")
-
-        # Use GROUP_ID from env if not specified in command
         chat_id = int(parsed_chat_id) if parsed_chat_id is not None else int(settings.group_id)
 
         poll = await PollService.create_scheduled(
@@ -99,7 +92,6 @@ async def cmd_poll(message: Message, settings: Settings, session: AsyncSession) 
                 question=question,
                 options=options,
                 points=points,
-                # IMPORTANT: store DB user id if available; fallback to None
                 created_by_admin_id=getattr(authz, "user_id", None) or getattr(authz, "db_user_id", None),
             ),
         )
@@ -108,7 +100,6 @@ async def cmd_poll(message: Message, settings: Settings, session: AsyncSession) 
     except Exception as e:
         await message.reply("❌ " + hd.quote(str(e)))
         return
-
 
     await message.reply(
         "✅ Poll scheduled\n"

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from aiogram import Router, F
+from aiogram import Router
+from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.utils.text_decorations import html_decoration as hd
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,9 +19,8 @@ router = Router()
 
 def _parse_poll_now(text: str) -> tuple[int | None, int, str, list[str]]:
     """
-    Supports:
     A) /poll_now <chat_id> | <points> | <question> | <opt1> | <opt2> | ...
-    B) /poll_now <points> | <question> | <opt1> | <opt2> | ... (uses settings.group_id)
+    B) /poll_now <points> | <question> | <opt1> | <opt2> | ... (uses GROUP_ID)
     """
     raw = (text or "").split(maxsplit=1)
     if len(raw) < 2:
@@ -32,21 +32,17 @@ def _parse_poll_now(text: str) -> tuple[int | None, int, str, list[str]]:
 
     parts = [p.strip() for p in raw[1].split("|") if p.strip()]
     if len(parts) < 4:
-        raise ValueError("Need: points | question | opt1 | opt2 ...  (or chat_id | points | question | opt1 | opt2 ...)")
+        raise ValueError("Need: points | question | opt1 | opt2 ... (or chat_id | points | question | opt1 | opt2 ...)")
 
-    # detect chat_id if first part looks like int and starts with -100... or digits
     chat_id: int | None = None
     first = parts[0]
-    if first.startswith("-") or first.isdigit():
-        # could be chat_id or could be points
-        # decide: if it starts with -100 or is very large negative => it's chat_id
-        try:
-            maybe = int(first)
-            if str(maybe).startswith("-100") or maybe <= -1000000000:
-                chat_id = maybe
-                parts = parts[1:]
-        except Exception:
-            pass
+    try:
+        maybe = int(first)
+        if str(maybe).startswith("-100") or maybe <= -1000000000:
+            chat_id = maybe
+            parts = parts[1:]
+    except Exception:
+        pass
 
     if len(parts) < 4:
         raise ValueError("Need: points | question | opt1 | opt2 ...")
@@ -78,7 +74,7 @@ async def require_admin_or_reply(message: Message, settings: Settings, session: 
     return authz
 
 
-@router.message(F.text.startswith("/poll_now"))
+@router.message(Command("poll_now"))
 async def poll_now_cmd(message: Message, settings: Settings, session: AsyncSession) -> None:
     authz = await require_admin_or_reply(message, settings, session)
     if not authz:
@@ -89,13 +85,13 @@ async def poll_now_cmd(message: Message, settings: Settings, session: AsyncSessi
         chat_id = int(parsed_chat_id) if parsed_chat_id is not None else int(settings.group_id)
 
         now = datetime.utcnow()
+        when = now + timedelta(seconds=1)  # ✅ must be future for create_scheduled validation
 
-        # Create DB poll, then post immediately and mark posted
         poll = await PollService.create_scheduled(
             session,
             CreatePollInput(
                 chat_id=chat_id,
-                scheduled_for_utc=now,  # immediate
+                scheduled_for_utc=when,
                 question=question,
                 options=options,
                 points=points,
@@ -112,7 +108,6 @@ async def poll_now_cmd(message: Message, settings: Settings, session: AsyncSessi
             allows_multiple_answers=False,
         )
 
-        # Pin (ignore permission failures)
         try:
             await message.bot.pin_chat_message(
                 chat_id=poll.chat_id,
@@ -133,7 +128,6 @@ async def poll_now_cmd(message: Message, settings: Settings, session: AsyncSessi
         await session.commit()
 
     except Exception as e:
-        # Escape error to avoid HTML parse crashes
         await message.reply("❌ " + hd.quote(str(e)))
         return
 
@@ -142,6 +136,6 @@ async def poll_now_cmd(message: Message, settings: Settings, session: AsyncSessi
         f"• Poll ID: <code>{poll.id}</code>\n"
         f"• Chat: <code>{poll.chat_id}</code>\n"
         f"• Points: <b>{poll.points}</b>\n"
-        "• It will auto-close after 24h and then award points.",
+        "• It will auto-close after 24h.",
         parse_mode="HTML",
     )
