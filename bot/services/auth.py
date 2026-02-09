@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import Settings
-from bot.database.models import Admin, AdminRole, User
+from bot.database.models import Admin, User
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +52,6 @@ class AuthService:
         user = res.scalar_one_or_none()
 
         if user:
-            # Keep data fresh (optional but useful)
             changed = False
             if username is not None and user.username != username:
                 user.username = username
@@ -85,10 +84,11 @@ class AuthService:
         first_name: str | None = None,
         last_name: str | None = None,
     ) -> AuthResult:
-        # Root admins come from env, always takes precedence.
-        if telegram_id in self.settings.root_admin_ids:
-            return AuthResult(is_root=True, is_admin=True, role="root")
-
+        """
+        ✅ FIX:
+        Always create/fetch the User row first.
+        Root admins ALSO need a User row because screenshot claiming uses admin_user.id (DB PK).
+        """
         user = await self.get_or_create_user_by_telegram(
             session=session,
             telegram_id=telegram_id,
