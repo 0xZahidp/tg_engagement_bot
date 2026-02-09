@@ -3,15 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import User, WeeklyUserStats
+from bot.database.models import User, WeeklyUserStats, PointEvent
 
+
+# ------------------------
+# Week helpers (unchanged)
+# ------------------------
 
 def week_start_utc(day_utc: date) -> date:
+    # Monday-based (legacy, still used for storage)
     return day_utc - timedelta(days=day_utc.weekday())
 
+
+# ------------------------
+# Shared row DTO
+# ------------------------
 
 @dataclass(frozen=True, slots=True)
 class LeaderRow:
@@ -22,6 +31,10 @@ class LeaderRow:
     first_name: str | None
     last_name: str | None
 
+
+# =========================================================
+# WEEKLY LEADERBOARD (UNCHANGED – BACKWARD COMPATIBLE)
+# =========================================================
 
 async def get_top_week(
     session: AsyncSession,
@@ -46,8 +59,10 @@ async def get_top_week(
         )
         .limit(limit)
     )
+
     res = await session.execute(q)
-    rows = []
+    rows: list[LeaderRow] = []
+
     for user_id, points, telegram_id, username, first_name, last_name in res.all():
         rows.append(
             LeaderRow(
@@ -59,6 +74,7 @@ async def get_top_week(
                 last_name=last_name,
             )
         )
+
     return rows
 
 
@@ -68,9 +84,10 @@ async def get_user_rank_week(
     user_id: int,
 ) -> tuple[int | None, int]:
     """
-    Returns (rank, points). rank is 1-based. If user has no row -> (None, 0).
+    Weekly rank (storage-based).
+    Returns (rank, points). rank is 1-based.
     """
-    # user points
+
     res = await session.execute(
         select(WeeklyUserStats.points).where(
             WeeklyUserStats.week_start == week_start,
@@ -81,11 +98,12 @@ async def get_user_rank_week(
     if points is None:
         return (None, 0)
 
-    # rank = number of users with strictly higher points + 1
-    # Tie-breaker: if equal points, earlier updated_at ranks higher; if equal updated_at, lower user_id ranks higher.
-    # For simplicity, we compute rank in two steps with subqueries.
     me = await session.execute(
-        select(WeeklyUserStats.points, WeeklyUserStats.updated_at, WeeklyUserStats.user_id).where(
+        select(
+            WeeklyUserStats.points,
+            WeeklyUserStats.updated_at,
+            WeeklyUserStats.user_id,
+        ).where(
             WeeklyUserStats.week_start == week_start,
             WeeklyUserStats.user_id == user_id,
         )
@@ -93,6 +111,7 @@ async def get_user_rank_week(
     me_row = me.first()
     if not me_row:
         return (None, int(points or 0))
+
     me_points, me_updated_at, me_user_id = me_row
 
     higher = await session.execute(
@@ -112,5 +131,97 @@ async def get_user_rank_week(
             ),
         )
     )
+
     rank = len(higher.all()) + 1
     return (rank, int(points or 0))
+
+
+# =========================================================
+# RANGE / CAMPAIGN LEADERBOARD (NEW)
+# =========================================================
+
+async def get_top_range(
+    session: AsyncSession,
+    start: date,
+    end: date,
+    limit: int = 10,
+) -> list[LeaderRow]:
+    """
+    Campaign or arbitrary date-range leaderboard.
+    Uses PointEvent ledger (authoritative).
+    """
+
+    q = (
+        select(
+            PointEvent.user_id,
+            func.sum(PointEvent.points).label("points"),
+            User.telegram_id,
+            User.username,
+            User.first_name,
+            User.last_name,
+        )
+        .join(User, User.id == PointEvent.user_id)
+        .where(PointEvent.day_utc.between(start, end))
+        .group_by(
+            PointEvent.user_id,
+            User.telegram_id,
+            User.username,
+            User.first_name,
+            User.last_name,
+        )
+        .order_by(desc(func.sum(PointEvent.points)))
+        .limit(limit)
+    )
+
+    res = await session.execute(q)
+    rows: list[LeaderRow] = []
+
+    for user_id, points, telegram_id, username, first_name, last_name in res.all():
+        rows.append(
+            LeaderRow(
+                user_id=int(user_id),
+                telegram_id=int(telegram_id),
+                points=int(points or 0),
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+            )
+        )
+
+    return rows
+
+
+async def get_user_rank_range(
+    session: AsyncSession,
+    start: date,
+    end: date,
+    user_id: int,
+) -> tuple[int | None, int]:
+    """
+    Rank within a campaign/date range.
+    """
+
+    totals = (
+        select(
+            PointEvent.user_id,
+            func.sum(PointEvent.points).label("points"),
+        )
+        .where(PointEvent.day_utc.between(start, end))
+        .group_by(PointEvent.user_id)
+        .subquery()
+    )
+
+    me = await session.execute(
+        select(totals.c.points).where(totals.c.user_id == user_id)
+    )
+    my_points = me.scalar_one_or_none()
+
+    if my_points is None:
+        return (None, 0)
+
+    higher = await session.execute(
+        select(totals.c.user_id).where(totals.c.points > my_points)
+    )
+
+    rank = len(higher.all()) + 1
+    return (rank, int(my_points))

@@ -13,13 +13,20 @@ from bot.database.models import User
 from bot.database.repo.leaderboard_repo import (
     get_top_week,
     get_user_rank_week,
+    get_top_range,
+    get_user_rank_range,
     week_start_utc,
 )
 from bot.services.auth import AuthService
 from bot.utils.reply import reply_safe
+from bot.utils.leaderboard_window import resolve_leaderboard_window
 
 router = Router()
 
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 
 def _utc_today():
     return datetime.now(tz=ZoneInfo("UTC")).date()
@@ -52,6 +59,10 @@ async def _get_or_create_user(
     return res.scalar_one_or_none()
 
 
+# -------------------------------------------------
+# Leaderboard command
+# -------------------------------------------------
+
 @router.message(F.text == "🏆 Leaderboard")
 @router.message(F.text == "/leaderboard")
 async def leaderboard_cmd(
@@ -63,18 +74,43 @@ async def leaderboard_cmd(
         return
 
     today_utc = _utc_today()
-    ws = week_start_utc(today_utc)
+    window = resolve_leaderboard_window(today_utc)
 
-    top = await get_top_week(session, ws, limit=10)
+    # =================================================
+    # 🟢 Campaign leaderboard (display override)
+    # =================================================
+    if window.kind == "campaign":
+        top = await get_top_range(session, window.start, window.end, limit=10)
+        my_rank, my_points = await get_user_rank_range(
+            session, window.start, window.end, user.id
+        )
+
+        title = "🏆 <b>Campaign Leaderboard</b>"
+        period_line = f"📅 <b>Campaign (UTC):</b> {window.start} → {window.end}"
+
+    # =================================================
+    # 🔵 Weekly leaderboard (default)
+    # =================================================
+    else:
+        ws = week_start_utc(today_utc)
+        top = await get_top_week(session, ws, limit=10)
+        my_rank, my_points = await get_user_rank_week(session, ws, user.id)
+
+        title = "🏆 <b>Weekly Leaderboard</b>"
+        period_line = f"📅 <b>Week starts (UTC):</b> {ws.isoformat()}"
+
+    # -------------------------------------------------
+    # Build response
+    # -------------------------------------------------
 
     lines = [
-        "🏆 <b>Weekly Leaderboard</b>",
-        f"📅 <b>Week starts (UTC):</b> {ws.isoformat()}",
+        title,
+        period_line,
         "",
     ]
 
     if not top:
-        lines.append("ℹ️ No points yet this week.")
+        lines.append("ℹ️ No points yet for this period.")
         await reply_safe(message, "\n".join(lines), parse_mode="HTML")
         return
 
@@ -94,22 +130,22 @@ async def leaderboard_cmd(
             my_rank_from_top = i
             my_points_from_top = int(row.points)
 
-    repo_rank, repo_points = await get_user_rank_week(session, ws, user.id)
+    # -------------------------------------------------
+    # User rank section
+    # -------------------------------------------------
 
     lines.append("")
+
     if my_rank_from_top is not None:
         lines.append(
             f"📍 <b>Your rank:</b> {my_rank_from_top} / <b>{my_points_from_top}</b> pts"
         )
     else:
-        if repo_rank is None:
+        if my_rank is None:
             lines.append("📍 <b>Your rank:</b> unranked (0 pts)")
         else:
-            rank_display = int(repo_rank)
-            if rank_display <= 0:
-                rank_display += 1
             lines.append(
-                f"📍 <b>Your rank:</b> {rank_display} / <b>{int(repo_points or 0)}</b> pts"
+                f"📍 <b>Your rank:</b> {int(my_rank)} / <b>{int(my_points or 0)}</b> pts"
             )
 
     await reply_safe(message, "\n".join(lines), parse_mode="HTML")

@@ -1,4 +1,3 @@
-# bot/scheduler/jobs.py
 from __future__ import annotations
 
 import logging
@@ -12,7 +11,10 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config.settings import Settings
-from bot.database.repo.leaderboard_repo import get_top_week
+from bot.database.repo.leaderboard_repo import (
+    get_top_week,
+    get_top_range,
+)
 from bot.database.repo.weekly_winners_repo import (
     get_snapshot_with_users,
     save_snapshot,
@@ -20,16 +22,21 @@ from bot.database.repo.weekly_winners_repo import (
 )
 from bot.utils.cards.weekly_winners_card import CardWinner, render_weekly_winners_card
 from bot.database.repo.screenshot_repo import expire_assignments
+from bot.utils.leaderboard_window import resolve_leaderboard_window
 
 log = logging.getLogger(__name__)
 
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 
 def _utc_today() -> date:
     return datetime.now(tz=ZoneInfo("UTC")).date()
 
 
 def week_start_utc(day_utc: date) -> date:
-    # Monday boundary
+    # Monday boundary (legacy weekly storage)
     return day_utc - timedelta(days=day_utc.weekday())
 
 
@@ -40,42 +47,89 @@ def _display_name(username: str | None, first_name: str | None, last_name: str |
     return name.strip() or "User"
 
 
-async def post_weekly_winners(bot: Bot, db, settings: Settings, *, mode: str = "previous") -> None:
-    """
-    Posts top 3 winners into settings.group_id.
+# -------------------------------------------------
+# Main job: post winners
+# -------------------------------------------------
 
-    mode:
-      - "previous" (default): last completed week (Mon-Sun UTC) ✅ production
-      - "current": current week so far ✅ testing
+async def post_weekly_winners(
+    bot: Bot,
+    db,
+    settings: Settings,
+    *,
+    mode: str | None = None,  # ✅ backward compatibility
+) -> None:
     """
+    Posts winners into settings.group_id.
+
+    Priority:
+    1️⃣ Campaign ending today → snapshot + announce ONCE
+    2️⃣ Otherwise → normal weekly (Sunday-based)
+
+    NOTE:
+    - `mode` is accepted for backward compatibility
+    - Campaign logic ALWAYS takes precedence
+    """
+
+    if mode:
+        log.info("post_weekly_winners called with legacy mode=%s (ignored)", mode)
+
     if not settings.group_id:
-        log.warning("Skipping weekly winners post: GROUP_ID is not set")
+        log.warning("Skipping winners post: GROUP_ID is not set")
         return
 
     today = _utc_today()
-    this_week = week_start_utc(today)
+    window = resolve_leaderboard_window(today)
 
-    if mode == "current":
-        target_week = this_week
-        week_end = today  # so far (today)
-        title = "Weekly Winners (Current Week • Test)"
+    # =================================================
+    # 🟢 CASE 1: Campaign just ended → announce once
+    # =================================================
+    if window.kind == "campaign" and today == window.end:
+        target_start = window.start
+        target_end = window.end
+        title = "🏆 Campaign Winners"
+
+        async def _run(session: AsyncSession):
+            if not await snapshot_exists(session, target_start):
+                top3 = await get_top_range(session, target_start, target_end, limit=3)
+                winners = [(r.user_id, r.points) for r in top3]
+                await save_snapshot(
+                    session,
+                    week_start=target_start,  # reuse column safely
+                    winners=winners,
+                    overwrite=False,
+                )
+                await session.commit()
+
+            return await get_snapshot_with_users(session, target_start)
+
+    # =================================================
+    # 🔵 CASE 2: Normal weekly flow (Sunday-based)
+    # =================================================
     else:
-        # default = previous completed week
-        target_week = this_week - timedelta(days=7)
-        week_end = this_week - timedelta(days=1)
+        # Announce PREVIOUS completed week
+        this_week = week_start_utc(today)
+        target_start = this_week - timedelta(days=7)
+        target_end = this_week - timedelta(days=1)
         title = "Weekly Winners"
 
-    async def _run(session: AsyncSession):
-        # Snapshot if missing (for that target week)
-        if not await snapshot_exists(session, target_week):
-            top3 = await get_top_week(session, target_week, limit=3)
-            winners = [(r.user_id, r.points) for r in top3]
-            await save_snapshot(session, week_start=target_week, winners=winners, overwrite=False)
-            await session.commit()
+        async def _run(session: AsyncSession):
+            if not await snapshot_exists(session, target_start):
+                top3 = await get_top_week(session, target_start, limit=3)
+                winners = [(r.user_id, r.points) for r in top3]
+                await save_snapshot(
+                    session,
+                    week_start=target_start,
+                    winners=winners,
+                    overwrite=False,
+                )
+                await session.commit()
 
-        return await get_snapshot_with_users(session, target_week)
+            return await get_snapshot_with_users(session, target_start)
 
-    # Open DB session
+    # -------------------------------------------------
+    # DB session handling
+    # -------------------------------------------------
+
     if callable(getattr(db, "session", None)):
         async with db.session() as session:
             snap = await _run(session)
@@ -86,39 +140,60 @@ async def post_weekly_winners(bot: Bot, db, settings: Settings, *, mode: str = "
         async with sessionmaker() as session:
             snap = await _run(session)
 
-    # If no winners, fallback text
+    # -------------------------------------------------
+    # No winners fallback
+    # -------------------------------------------------
+
     if not snap:
         await bot.send_message(
             chat_id=settings.group_id,
             text=(
                 f"🏆 <b>{title}</b>\n"
-                f"📅 <b>Week (UTC):</b> {target_week.isoformat()} → {week_end.isoformat()}\n\n"
+                f"📅 <b>Period (UTC):</b> {target_start.isoformat()} → {target_end.isoformat()}\n\n"
                 "ℹ️ No points were earned for this period."
             ),
         )
         return
 
+    # -------------------------------------------------
+    # Render & send card
+    # -------------------------------------------------
+
     winners_for_card: list[CardWinner] = []
     for row in snap:
         name = _display_name(row.username, row.first_name, row.last_name)
-        winners_for_card.append(CardWinner(rank=row.rank, name=name, points=row.points))
+        winners_for_card.append(
+            CardWinner(rank=row.rank, name=name, points=row.points)
+        )
 
     png_bytes = render_weekly_winners_card(
-        week_start=target_week,
-        week_end=week_end,
+        week_start=target_start,
+        week_end=target_end,
         winners=winners_for_card,
         title=title,
     )
 
-    photo = BufferedInputFile(png_bytes, filename=f"weekly_winners_{target_week.isoformat()}_{mode}.png")
+    photo = BufferedInputFile(
+        png_bytes,
+        filename=f"winners_{target_start.isoformat()}.png",
+    )
 
     caption = (
         f"🏆 <b>{title}</b>\n"
-        f"📅 <b>Week (UTC):</b> {target_week.isoformat()} → {week_end.isoformat()}\n\n"
+        f"📅 <b>Period (UTC):</b> {target_start.isoformat()} → {target_end.isoformat()}\n\n"
         "🔥 Keep grinding!"
     )
 
-    await bot.send_photo(chat_id=settings.group_id, photo=photo, caption=caption)
+    await bot.send_photo(
+        chat_id=settings.group_id,
+        photo=photo,
+        caption=caption,
+    )
+
+
+# -------------------------------------------------
+# Scheduler setup
+# -------------------------------------------------
 
 def build_scheduler(bot: Bot, db, settings: Settings) -> AsyncIOScheduler:
     """
@@ -126,11 +201,16 @@ def build_scheduler(bot: Bot, db, settings: Settings) -> AsyncIOScheduler:
     """
     scheduler = AsyncIOScheduler(timezone="UTC")
 
-    # ✅ Production: Every Monday 00:05 UTC
-    trigger = CronTrigger(day_of_week="mon", hour=0, minute=5, timezone="UTC")
-
-    # ✅ Dev/Test (uncomment temporarily):
-    # trigger = CronTrigger(minute="*/1", timezone="UTC")
+    # ✅ Production: Every Sunday 00:05 UTC
+    scheduler.add_job(
+        post_weekly_winners,
+        trigger=CronTrigger(day_of_week="sun", hour=0, minute=5, timezone="UTC"),
+        kwargs={"bot": bot, "db": db, "settings": settings},
+        id="post_weekly_winners",
+        replace_existing=True,
+        coalesce=True,
+        misfire_grace_time=300,
+    )
 
     scheduler.add_job(
         expire_screenshot_assignments,
@@ -143,6 +223,11 @@ def build_scheduler(bot: Bot, db, settings: Settings) -> AsyncIOScheduler:
     )
 
     return scheduler
+
+
+# -------------------------------------------------
+# Screenshot expiry
+# -------------------------------------------------
 
 async def expire_screenshot_assignments(db) -> None:
     async def _run(session: AsyncSession):
@@ -159,4 +244,3 @@ async def expire_screenshot_assignments(db) -> None:
             raise RuntimeError("Database object has no session() or sessionmaker/async_sessionmaker")
         async with sessionmaker() as session:
             await _run(session)
-
