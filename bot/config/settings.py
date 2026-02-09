@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -22,16 +23,34 @@ def _to_int(value: str, key_name: str) -> int:
         raise RuntimeError(f"Invalid integer for {key_name}: {value!r}") from e
 
 
-def _parse_int_list(raw: str, key_name: str) -> list[int]:
-    raw = raw.strip()
+def _parse_int_list(raw: str | None, key_name: str) -> list[int]:
+    """
+    Parses comma/space/newline separated ints.
+    Accepts:
+      "951258732"
+      "951258732,123"
+      "951258732 123"
+      "951258732\n123"
+      "[951258732, 123]"  (brackets ignored)
+    """
     if not raw:
         return []
-    parts = [p.strip() for p in raw.split(",")]
+
+    # remove common bracket wrappers
+    cleaned = raw.strip().strip("[](){}").strip()
+    if not cleaned:
+        return []
+
+    # split by comma OR any whitespace
+    parts = [p for p in re.split(r"[,\s]+", cleaned) if p]
+
     out: list[int] = []
     for p in parts:
-        if not p:
+        # extra safety: strip any stray quotes
+        p2 = p.strip().strip("'\"")
+        if not p2:
             continue
-        out.append(_to_int(p, key_name))
+        out.append(_to_int(p2, key_name))
     return out
 
 
@@ -39,7 +58,7 @@ def _parse_int_list(raw: str, key_name: str) -> list[int]:
 class Settings:
     # --- required ---
     bot_token: str
-    bot_username: str  # 🔥 REQUIRED for deep links
+    bot_username: str  # required for deep links
 
     # --- optional ---
     database_url: str = "sqlite+aiosqlite:///./bot.db"
@@ -71,31 +90,30 @@ class Settings:
         env = os.environ
 
         bot_token = _require(env, "BOT_TOKEN")
-        bot_username = _require(env, "BOT_USERNAME")  # ✅ FIXED
+        bot_username = _require(env, "BOT_USERNAME")
 
-        database_url = env.get("DATABASE_URL", "sqlite+aiosqlite:///./bot.db").strip()
+        database_url = (env.get("DATABASE_URL") or "sqlite+aiosqlite:///./bot.db").strip()
 
-        root_admin_ids_raw = env.get("ROOT_ADMIN_IDS", "")
-        root_admin_ids_list = _parse_int_list(root_admin_ids_raw, "ROOT_ADMIN_IDS")
+        root_admin_ids = tuple(_parse_int_list(env.get("ROOT_ADMIN_IDS"), "ROOT_ADMIN_IDS"))
 
-        group_id_raw = env.get("GROUP_ID", "").strip()
+        group_id_raw = (env.get("GROUP_ID") or "").strip()
         group_id = _to_int(group_id_raw, "GROUP_ID") if group_id_raw else None
 
-        admin_review_chat_id_raw = env.get("ADMIN_REVIEW_CHAT_ID", "").strip()
+        admin_review_chat_id_raw = (env.get("ADMIN_REVIEW_CHAT_ID") or "").strip()
         admin_review_chat_id = (
             _to_int(admin_review_chat_id_raw, "ADMIN_REVIEW_CHAT_ID")
             if admin_review_chat_id_raw
             else None
         )
 
-        timezone = env.get("TIMEZONE", "UTC").strip() or "UTC"
-        environment = env.get("ENVIRONMENT", "production").strip() or "production"
+        timezone = (env.get("TIMEZONE") or "UTC").strip() or "UTC"
+        environment = (env.get("ENVIRONMENT") or "production").strip() or "production"
 
         return cls(
             bot_token=bot_token,
             bot_username=bot_username,
             database_url=database_url,
-            root_admin_ids=tuple(root_admin_ids_list),
+            root_admin_ids=root_admin_ids,
             group_id=group_id,
             admin_review_chat_id=admin_review_chat_id,
             timezone=timezone,
