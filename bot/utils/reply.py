@@ -1,18 +1,15 @@
-# bot/utils/reply.py
+from __future__ import annotations
+
 from aiogram.types import Message
+
 from bot.keyboards.main import main_menu_kb
 
 
-async def reply_safe(
-    message: Message,
-    text: str,
-    **kwargs,
-):
+async def reply_safe(message: Message, text: str, **kwargs) -> None:
     """
-    Send message with main menu ONLY in private chat.
-    Groups will never receive reply keyboards.
+    Safe reply helper:
+    - By default, attaches main_menu_kb()
+    - Allows callers to override reply_markup by passing reply_markup=...
     """
-    if message.chat.type == "private":
-        await message.answer(text, reply_markup=main_menu_kb(), **kwargs)
-    else:
-        await message.answer(text, **kwargs)
+    kwargs.setdefault("reply_markup", main_menu_kb())
+    await message.answer(text, **kwargs)

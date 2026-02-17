@@ -1,4 +1,3 @@
-# bot/config/settings.py
 from __future__ import annotations
 
 import os
@@ -36,17 +35,14 @@ def _parse_int_list(raw: str | None, key_name: str) -> list[int]:
     if not raw:
         return []
 
-    # remove common bracket wrappers
     cleaned = raw.strip().strip("[](){}").strip()
     if not cleaned:
         return []
 
-    # split by comma OR any whitespace
     parts = [p for p in re.split(r"[,\s]+", cleaned) if p]
 
     out: list[int] = []
     for p in parts:
-        # extra safety: strip any stray quotes
         p2 = p.strip().strip("'\"")
         if not p2:
             continue
@@ -69,6 +65,7 @@ class Settings:
     # --- telegram targets ---
     group_id: Optional[int] = None
     admin_review_chat_id: Optional[int] = None
+    group_invite_link: Optional[str] = None  # ✅ NEW
 
     # --- scheduler / time ---
     timezone: str = "UTC"
@@ -106,6 +103,8 @@ class Settings:
             else None
         )
 
+        group_invite_link = (env.get("GROUP_INVITE_LINK") or "").strip() or None  # ✅ NEW
+
         timezone = (env.get("TIMEZONE") or "UTC").strip() or "UTC"
         environment = (env.get("ENVIRONMENT") or "production").strip() or "production"
 
@@ -116,6 +115,7 @@ class Settings:
             root_admin_ids=root_admin_ids,
             group_id=group_id,
             admin_review_chat_id=admin_review_chat_id,
+            group_invite_link=group_invite_link,  # ✅ NEW
             timezone=timezone,
             environment=environment,
         )

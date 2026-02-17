@@ -11,6 +11,7 @@ from bot.handlers.user.leaderboard import router as leaderboard_router
 from bot.handlers.user.screenshot import router as screenshot_router
 from .spin import router as spin_router
 from bot.handlers.user.poll import router as poll_user_router
+from bot.handlers.user.referral import router as referral_router
 
 
 router = Router(name="user")
@@ -25,3 +26,4 @@ router.include_router(leaderboard_router)
 router.include_router(screenshot_router)
 router.include_router(spin_router)
 router.include_router(poll_user_router)
+router.include_router(referral_router)

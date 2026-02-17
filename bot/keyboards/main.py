@@ -8,6 +8,7 @@ BTN_POLL = "📊 Poll"
 BTN_SCREENSHOT = "🖼 Screenshot"
 BTN_SPIN = "🎰 Spin"
 BTN_LEADERBOARD = "🏆 Leaderboard"
+BTN_REFERRAL = "👥 Referral"   # ✅ NEW
 
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
@@ -16,7 +17,7 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_CHECKIN), KeyboardButton(text=BTN_STATUS)],
             [KeyboardButton(text=BTN_QUIZ), KeyboardButton(text=BTN_POLL)],
             [KeyboardButton(text=BTN_SCREENSHOT), KeyboardButton(text=BTN_SPIN)],
-            [KeyboardButton(text=BTN_LEADERBOARD)],
+            [KeyboardButton(text=BTN_LEADERBOARD), KeyboardButton(text=BTN_REFERRAL)],  # ✅ add here
         ],
         resize_keyboard=True,
         input_field_placeholder="Choose an action…",

@@ -28,6 +28,7 @@ class PointSource(str, enum.Enum):
     SCREENSHOT = "screenshot"
     SPIN = "spin"
     ADMIN_ADJUST = "admin_adjust"
+    REFERRAL = "referral"  
 
 
 class WeeklyUserStats(Base):
