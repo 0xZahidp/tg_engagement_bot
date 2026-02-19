@@ -1,8 +1,9 @@
 # bot/main.py
 import asyncio
+import contextlib
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -12,10 +13,14 @@ from bot.database import Database
 # IMPORTANT: register models
 from bot.database.models import *  # noqa: F401,F403
 
-from bot.utils.middleware import DbSessionMiddleware
 from bot.handlers import router as handlers_router
 from bot.scheduler import setup_scheduler
 from bot.services.poll_scheduler import poll_scheduler_loop
+from bot.utils.middleware import DbSessionMiddleware
+
+# ✅ NEW: auto-delete bot messages + delete user commands in main group
+from bot.utils.autodelete_bot import AutoDeleteBot
+from bot.utils.autodelete_commands_mw import AutoDeleteCommandsMiddleware
 
 
 def setup_logging(is_dev: bool) -> None:
@@ -54,10 +59,15 @@ async def main() -> None:
     await db.init_models()
     log.info("DB initialized")
 
-    bot = Bot(
+    # ✅ IMPORTANT: use AutoDeleteBot (NOT aiogram.Bot)
+    bot = AutoDeleteBot(
         token=settings.bot_token,
+        settings=settings,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # ✅ sanity log: must print "AutoDeleteBot"
+    log.info("Bot class: %s", bot.__class__.__name__)
 
     dp = Dispatcher()
 
@@ -67,6 +77,9 @@ async def main() -> None:
 
     # DB session per update
     dp.update.middleware(DbSessionMiddleware(db))
+
+    # ✅ delete user command messages (/quiz, /leaderboard, etc.) in MAIN GROUP after 60s
+    dp.message.middleware(AutoDeleteCommandsMiddleware(settings, delay_seconds=60))
 
     # Include routers (admin/user/common)
     dp.include_router(handlers_router)
@@ -114,5 +127,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    import contextlib
     asyncio.run(main())

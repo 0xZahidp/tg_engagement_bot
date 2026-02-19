@@ -1,12 +1,11 @@
+# bot/database/repo/screenshot_repo.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
-from datetime import timedelta
-from sqlalchemy import func
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import ScreenshotSubmission, ScreenshotStatus, User
@@ -23,7 +22,9 @@ def _utc_now_naive() -> datetime:
     return datetime.now(tz=ZoneInfo("UTC")).replace(tzinfo=None)
 
 
-async def get_submission_for_day(session: AsyncSession, *, user_id: int, day_utc: date) -> ScreenshotSubmission | None:
+async def get_submission_for_day(
+    session: AsyncSession, *, user_id: int, day_utc: date
+) -> ScreenshotSubmission | None:
     q = select(ScreenshotSubmission).where(
         ScreenshotSubmission.user_id == user_id,
         ScreenshotSubmission.day_utc == day_utc,
@@ -140,6 +141,8 @@ async def decide_submission(
     )
     res = await session.execute(stmt)
     return (res.rowcount or 0) > 0
+
+
 async def set_admin_post_meta(
     session: AsyncSession,
     *,
@@ -152,6 +155,23 @@ async def set_admin_post_meta(
         .where(ScreenshotSubmission.id == submission_id)
         .values(admin_chat_id=admin_chat_id, admin_message_id=admin_message_id)
     )
+    await session.flush()
+
+
+# ✅ NEW: save approved screenshot post meta (main group message id)
+async def set_group_post_meta(
+    session: AsyncSession,
+    *,
+    submission_id: int,
+    group_chat_id: int,
+    group_message_id: int,
+) -> None:
+    await session.execute(
+        update(ScreenshotSubmission)
+        .where(ScreenshotSubmission.id == submission_id)
+        .values(group_chat_id=int(group_chat_id), group_message_id=int(group_message_id))
+    )
+    await session.flush()
 
 
 async def claim_submission(
@@ -225,7 +245,6 @@ async def get_queue_counts(session: AsyncSession, *, day_utc: date | None = None
     res = await session.execute(base)
     rows = res.all()
     out = {s.value: int(c) for s, c in rows}
-    # ensure keys exist
     for k in ("pending", "approved", "rejected", "expired", "canceled"):
         out.setdefault(k, 0)
     return out

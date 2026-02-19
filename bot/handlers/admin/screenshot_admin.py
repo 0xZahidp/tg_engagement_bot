@@ -1,3 +1,4 @@
+# bot/handlers/admin/screenshot_admin.py
 from __future__ import annotations
 
 import logging
@@ -17,6 +18,7 @@ from bot.database.repo.screenshot_repo import (
     claim_submission,
     decide_submission,
     get_submission_with_user,
+    set_group_post_meta,  # ✅ NEW import
 )
 from bot.services.auth import AuthService
 from bot.services.task_progress import TaskProgressService
@@ -73,12 +75,10 @@ def _display_name(u: User) -> str:
 
 
 def _mention_html(u: User) -> str:
-    # clickable mention even if no username
     return f'<a href="tg://user?id={u.telegram_id}">{_display_name(u)}</a>'
 
 
 def _admin_label(u: User) -> str:
-    # Prefer @username, else clickable mention
     if u.username:
         return f"@{u.username}"
     return _mention_html(u)
@@ -91,7 +91,6 @@ async def screenshot_review_action(
     session: AsyncSession,
     bot,
 ) -> None:
-    # always answer callback quickly
     try:
         await cb.answer()
     except Exception:
@@ -106,7 +105,6 @@ async def screenshot_review_action(
             await cb.message.answer("⛔ You are not allowed to use admin commands.")
         return
 
-    # Parse: ss:<action>:<submission_id>
     parts = cb.data.split(":")
     if len(parts) != 3:
         return
@@ -126,19 +124,16 @@ async def screenshot_review_action(
     sub = pack.submission
     user = pack.user
 
-    # Keep buttons alive (claim works after expiry)
     if cb.message:
         try:
             await cb.message.edit_reply_markup(reply_markup=_kb(submission_id))
         except Exception:
             pass
 
-    # Load config (DB-backed)
     cfg = await get_config(session)
     ttl = int(cfg.screenshot_claim_ttl_minutes)
     points = int(cfg.screenshot_points)
 
-    # If screenshots are disabled, block actions
     if not cfg.screenshot_enabled:
         if cb.message:
             await cb.message.answer("🚫 Screenshot review is currently disabled by admins.")
@@ -207,10 +202,8 @@ async def screenshot_review_action(
         )
         await session.commit()
 
-        # Points actually awarded now (0 if already credited)
         pts_awarded = points if award.awarded else 0
 
-        # Update admin-review message UI
         if cb.message:
             try:
                 await cb.message.edit_caption((cb.message.caption or "") + "\n\n✅ <b>APPROVED</b>")
@@ -218,7 +211,6 @@ async def screenshot_review_action(
             except Exception:
                 pass
 
-        # ✅ NEW: send message in REVIEW GROUP: approved by admin
         if cb.message:
             try:
                 await cb.message.answer(
@@ -228,7 +220,7 @@ async def screenshot_review_action(
             except Exception:
                 pass
 
-        # ✅ Notify user (DM)
+        # Notify user (DM)
         try:
             extra = "" if award.awarded else " (already credited)"
             await bot.send_message(
@@ -238,7 +230,7 @@ async def screenshot_review_action(
         except Exception:
             log.exception("Failed to notify user approval")
 
-        # ✅ Post approved screenshot to MAIN GROUP (+ points + name + optional username)
+        # ✅ Post approved screenshot to MAIN GROUP (and SAVE message id)
         main_group_id = settings.group_id
         if main_group_id:
             uname = f"@{user.username}" if user.username else ""
@@ -253,12 +245,22 @@ async def screenshot_review_action(
             )
 
             try:
-                await bot.send_photo(
+                m = await bot.send_photo(
                     chat_id=main_group_id,
                     photo=sub.image_file_id,
                     caption=caption,
                     parse_mode="HTML",
                 )
+
+                # ✅ Save to DB so you have exact reference
+                await set_group_post_meta(
+                    session,
+                    submission_id=submission_id,
+                    group_chat_id=m.chat.id,
+                    group_message_id=m.message_id,
+                )
+                await session.commit()
+
             except Exception:
                 log.exception("Failed to post approved screenshot to main group")
 
@@ -290,13 +292,11 @@ async def screenshot_review_action(
             except Exception:
                 pass
 
-        # ✅ Ensure user gets rejection DM
         try:
             await bot.send_message(chat_id=user.telegram_id, text="❌ Your screenshot was rejected.")
         except Exception:
             log.exception("Failed to notify user rejection")
         return
 
-    # Unknown action
     if cb.message:
         await cb.message.answer("❌ Unknown action.")
